@@ -4,15 +4,16 @@ import streamlit as st
 from fpdf import FPDF
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain, SequentialChain
+from langchain.chains.base import Chain
 from langchain.chat_models import ChatOpenAI
 from langchain.llms.base import LLM
 from pydantic import BaseModel
 import requests
-from typing import Optional, List
+from typing import Optional, List, ClassVar
 
-load_dotenv()
+load_dotenv(dotenv_path=".env")
 
-class AzureLLMService(LLM, BaseModel):    
+class AzureLLMService(LLM, BaseModel):
     endpoint: str
     api_key: str
     model: str
@@ -41,51 +42,7 @@ class AzureLLMService(LLM, BaseModel):
             return response.json()["choices"][0]["message"]["content"]
         raise ValueError(f"API Error: {response.status_code}, {response.text}")
 
-
-class LangChainService:
-    def __init__(self, base_llm: LLM, enricher_llm: LLM):
-        self.pipeline = self._create_pipeline(base_llm, enricher_llm)
-
-    def _create_pipeline(self, base_llm: LLM, enricher_llm: LLM):
-        base_message_prompt = PromptTemplate(
-            input_variables=["name", "relation", "hobbies", "tone"],
-            template="""
-            Create a personalized Christmas message:
-            - Recipient's name: {name}
-            - Relationship with sender: {relation}
-            - Recipient's hobbies or preferences: {hobbies}
-            - Desired tone: {tone}
-
-            Example:
-            Dear {name},
-            As we approach the most wonderful time of the year, I wanted to take a moment to wish you a Merry Christmas!
-            Since you are my {relation}, I know how much you enjoy {hobbies}, and I hope this holiday season brings you joy and happiness.
-            """
-        )
-        enrich_message_prompt = PromptTemplate(
-            input_variables=["base_message", "region"],
-            template="""
-            Based on the following Christmas message:
-            "{base_message}"
-            
-            Enrich it with cultural or Christmas traditions related to {region} maintaining the same tone and structure:
-            Mention specific holiday activities or traditions unique to this region to make the message more personal and heartfelt.
-            Return only the text of final enriched message.
-            """
-        )
-        base_message_chain = LLMChain(llm=base_llm, prompt=base_message_prompt, output_key="base_message")
-        enrich_message_chain = LLMChain(llm=enricher_llm, prompt=enrich_message_prompt, output_key="final_message")
-        return SequentialChain(
-            chains=[base_message_chain, enrich_message_chain],
-            input_variables=["name", "relation", "hobbies", "tone", "region"],
-            output_variables=["final_message"],
-            verbose=True,
-        )
-
-    def generate_message(self, inputs: dict) -> str:
-        return self.pipeline.run(inputs)
-
-class PDFService:    
+class PDFService:
     @staticmethod
     def normalize_text(text):
         import unicodedata
@@ -100,6 +57,64 @@ class PDFService:
         pdf.ln(10)
         pdf.multi_cell(0, 10, txt=PDFService.normalize_text(message))
         return pdf.output(dest="S").encode("latin-1")
+
+class PDFChain(Chain):
+    input_keys: ClassVar[List[str]] = ["final_message", "name"]
+    output_keys: ClassVar[List[str]] = ["pdf_file"]
+
+    def _call(self, inputs: dict) -> dict:
+        pdf_file = PDFService.generate_pdf(inputs["final_message"], inputs["name"])
+        return {"pdf_file": pdf_file}
+
+    @property
+    def _chain_type(self) -> str:
+        return "pdf_chain"
+
+class LangChainService:
+    def __init__(self, base_llm: LLM, enricher_llm: LLM):
+        self.pipeline = self._create_pipeline(base_llm, enricher_llm)
+
+    def _create_pipeline(self, base_llm: LLM, enricher_llm: LLM):
+        base_message_prompt = PromptTemplate(
+            input_variables=["name", "relation", "hobbies", "tone","sender_name"],
+            template="""
+                Create a personalized Christmas message:
+                - Recipient's name: {name}
+                - Relationship with sender: {relation}
+                - Recipient's hobbies or preferences: {hobbies}
+                - Desired tone: {tone}
+                - Sender's name: {sender_name}
+
+                Example:
+                Dear {name},
+                As we approach the most wonderful time of the year, I wanted to take a moment to wish you a Merry Christmas!
+                Since you are my {relation}, I know how much you enjoy {hobbies}, and I hope this holiday season brings you joy and happiness.
+                            """
+        )
+        enrich_message_prompt = PromptTemplate(
+            input_variables=["base_message", "region"],
+            template="""
+            Based on the following Christmas message:
+            "{base_message}"
+                        
+            Enrich it with cultural or Christmas traditions related to {region} maintaining the same tone and structure:
+            Mention specific holiday activities or traditions unique to this region to make the message more personal and heartfelt.
+            Return only the text of final enriched message.
+                        """
+        )
+        base_message_chain = LLMChain(llm=base_llm, prompt=base_message_prompt, output_key="base_message")
+        enrich_message_chain = LLMChain(llm=enricher_llm, prompt=enrich_message_prompt, output_key="final_message")
+        pdf_chain = PDFChain()
+        
+        return SequentialChain(
+            chains=[base_message_chain, enrich_message_chain, pdf_chain],
+            input_variables=["name", "relation", "hobbies", "tone", "region", "sender_name"],
+            output_variables=["pdf_file"],
+            verbose=True,
+        )
+
+    def generate_message(self, inputs: dict) -> bytes:
+        return self.pipeline.run(inputs)
 
 def main():
     base_llm = ChatOpenAI(
@@ -145,20 +160,12 @@ def main():
                 "hobbies": hobbies or "their favorite activities",
                 "tone": tone,
                 "region": region,
+                "sender_name": sender_name,
             }
-
             with st.spinner("Processing..."):
                 try:
-                    final_message = langchain_service.generate_message(inputs)
-                    final_message = final_message.replace("[Your Name]", sender_name)
-
-                    st.subheader("Final Enriched Message")
-                    st.write(final_message)
-
-                    pdf_file = PDFService.generate_pdf(final_message, name)
-
+                    pdf_file = langchain_service.generate_message(inputs)
                     st.success("Christmas card created successfully!")
-
                     st.download_button(
                         label="📥 Download PDF",
                         data=pdf_file,

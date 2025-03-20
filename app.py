@@ -133,7 +133,7 @@ def main():
         max_tokens=int(os.getenv("AZURE_ENRICHER_MAX_TOKENS", 300)),
     )
 
-    langchain_service = LangChainService(base_llm=base_llm, enricher_llm=enricher_llm)
+    langchain_service = LangChainService(base_llm=base_llm, enricher_llm=base_llm)
 
     st.title("🎅 Christmas Card Assistant with LangChain")
 
